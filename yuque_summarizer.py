@@ -1,14 +1,24 @@
+# yuque_summarizer.py (修正版)
+
 from simhash import Simhash
 from diff_utils import find_diff
+# --- 修正 1: 导入正确的语雀获取函数 ---
 from yuque_fetcher import fetch_yuque_data
 import json
 import os
 import requests
 from datetime import datetime, timedelta
 from simhash_utils import generate_simhash, get_hamming_distance
+# --- 修正 2: 导入统一配置中心的配置 ---
+from config import YUQUE_TOKEN, YUQUE_GROUP, YUQUE_BOOK, YUQUE_BASE_URL, SIMHASH_THRESHOLD
 
+
+# ----------------------------------------------------------------------
+# 辅助函数：数据存储与加载
+# ----------------------------------------------------------------------
 
 def load_data(filename):
+    """从文件中加载历史数据。"""
     if os.path.exists(filename):
         try:
             with open(filename, 'r', encoding='utf-8') as f:
@@ -22,6 +32,7 @@ def load_data(filename):
 
 
 def save_data(filename, data):
+    """将数据保存到文件。"""
     try:
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
@@ -29,133 +40,150 @@ def save_data(filename, data):
         print(f"错误：无法将数据保存到文件{filename}:{e}")
 
 
-def get_doc_body(token, group_login, book_slug, doc_id):
-    url = f"https://www.yuque.com/api/v2/repos/{group_login}/{book_slug}/docs/{doc_id}"
+# ----------------------------------------------------------------------
+# 辅助函数：获取单个文档正文
+# ----------------------------------------------------------------------
+
+def get_doc_body(doc_id: str) -> str or None:
+    """
+    获取单个语雀文档的正文内容（Markdown格式）。
+    内部使用 config.py 中的全局配置。
+    """
+    # 使用 config.py 中的配置
+    url = f"{YUQUE_BASE_URL}/repos/{YUQUE_GROUP}/{YUQUE_BOOK}/docs/{doc_id}?raw=true"
     headers = {
-        "X-Auth-Token": token,
+        "X-Auth-Token": YUQUE_TOKEN,
         "Content-Type": "application/json"
     }
 
     try:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
-
         doc_data = response.json().get("data")
-        if doc_data and "body" in doc_data:
-            return doc_data.get("body")
-        else:
-            print(f"警告：API 返回数据结构不完整或文档 {doc_id} 内容为空。")
-            return None
+
+        if doc_data:
+            return doc_data.get('body_markdown', doc_data.get('body'))
+        return None
+
     except requests.exceptions.RequestException as e:
-        print(f"API 请求失败: {e}")
-        return None
-    except KeyError as e:
-        print(f"API 返回数据结构错误，缺少键: {e}")
+        print(f"ERROR: 获取文档 {doc_id} 正文失败: {e}")
         return None
 
 
+# ----------------------------------------------------------------------
+# 核心功能：语雀文档增量更新与差异检测
+# ----------------------------------------------------------------------
 
-TOKEN = "s91TCRkU7KDHYAqy9F5ACOa4WoYUNZKvpI1hsj2S"
-GROUP_LOGIN = "ph25ri"
-BOOK_SLUG = "ua1c3q"
-data_file = "yuque_data.json"
+def check_yuque_updates(data_file='yuque_history.json', simhash_threshold=SIMHASH_THRESHOLD):
+    """
+    检查语雀知识库的更新，过滤不显著的更改和同质化内容。
 
-# 1. 加载上次运行保存的数据
-last_run_data = load_data(data_file)
+    返回:
+    list: 包含有显著变化或新增文档的列表 (仅包含文档元数据)。
+    """
+    # 1. 获取本次运行的文档元数据
+    yuque_metadata = fetch_yuque_data()
 
-# 2. 从语雀 API 获取最新数据
-new_yuque_data = fetch_yuque_data(TOKEN, GROUP_LOGIN, BOOK_SLUG)
-new_docs_map = new_yuque_data.get("docs_map") if new_yuque_data else {}
+    if not yuque_metadata:
+        print("无法获取语雀数据，请检查配置或网络连接。")
+        return []
 
-# 一个字典，用于存储本次运行的最新数据
-new_run_data = {}
+    # 2. 加载上次运行的历史数据
+    last_run_data = load_data(data_file)
+    new_run_data = {}  # 用于存储本次运行后的所有数据
+    updated_docs_meta = []  # 存储需要返回给主流程进行 AI 处理的文档元数据
 
-if new_docs_map:
-    for doc_id, new_doc_info in new_docs_map.items():
-        # 注意：JSON 文件的键默认为字符串，所以这里要转换类型
-        doc_id_str = str(doc_id)
-        last_doc_info = last_run_data.get(doc_id_str, {})
+    for doc_meta in yuque_metadata:
+        doc_id_str = str(doc_meta.get('id'))
 
-        # 检查文档是否为新增，或更新时间是否变化
-        is_new_doc = doc_id_str not in last_run_data
-        is_updated = last_doc_info.get("updated_at") != new_doc_info.get("updated_at")
+        # 提取关键信息
+        updated_at = doc_meta.get('updated_at')
+        last_doc_info = last_run_data.get(doc_id_str)
 
-        # 如果文档有更新或为新增，则进行详细处理
-        if is_new_doc or is_updated:
-            print(f"检测到更新：{new_doc_info['title']}...")
+        # --------------------------------------------
+        # 步骤 A: 判断文档是否更新 (时间戳比对)
+        # --------------------------------------------
+        is_updated = False
+        if not last_doc_info:
+            # 新增文档
+            is_updated = True
+            print(f" [NEW] 新增文档: {doc_meta.get('title')}")
+        elif updated_at > last_doc_info.get('updated_at', '1970-01-01T00:00:00Z'):
+            # 已有文档，且时间戳发生变化
+            is_updated = True
+            print(f" [UPDATE] 文档已更新: {doc_meta.get('title')}")
 
-            # 3. 按需获取文档正文
-            document_body = get_doc_body(TOKEN, GROUP_LOGIN, BOOK_SLUG, doc_id)
+        # --------------------------------------------
+        # 步骤 B: 如果已更新，则进一步判断差异是否显著 (SimHash比对)
+        # --------------------------------------------
+        if is_updated:
+            document_body = get_doc_body(doc_id_str)
+            if not document_body:
+                # 无法获取正文，跳过本次处理
+                new_run_data[doc_id_str] = last_doc_info or doc_meta  # 至少保留元数据
+                continue
 
-            # 如果成功获取到正文
-            if document_body:
-                new_simhash_obj = generate_simhash(document_body)
+            # 生成新文档的 SimHash
+            new_simhash_obj = generate_simhash(document_body)
+            new_doc_info = doc_meta.copy()
 
-                # 4. SimHash 过滤器开始：只有在文档不是新增且有旧指纹时才进行比对
-                if not is_new_doc and "simhash" in last_doc_info:
-                    old_simhash_value = last_doc_info["simhash"]
-                    old_simhash_obj = Simhash(old_simhash_value)
+            # 检查差异是否显著
+            is_significant = False
 
-                    distance = get_hamming_distance(old_simhash_obj, new_simhash_obj)
+            if not last_doc_info:
+                # 新文档：自动视为显著更新
+                is_significant = True
+            elif last_doc_info.get('simhash'):
+                # 非首次：比对 SimHash 汉明距离
+                old_simhash_value = last_doc_info['simhash']
+                old_simhash_obj = Simhash(int(old_simhash_value))
 
-                    # 如果汉明距离小于或等于3，则认为是微小更新
-                    if distance <= 3:
-                        print(f"检测到微小更新，文档：{new_doc_info['title']}，汉明距离：{distance}。已跳过。")
-                        # 即使是微小更新，也需要将新数据保存下来
-                        new_run_data[doc_id_str] = new_doc_info
-                        new_run_data[doc_id_str]["body"] = document_body
-                        new_run_data[doc_id_str]["simhash"] = new_simhash_obj.value
-                        continue  # 跳到下一个文档，不再进行后续处理
+                distance = get_hamming_distance(old_simhash_obj, new_simhash_obj)
+                print(f"   - SimHash 距离: {distance} (阈值: {simhash_threshold})")
 
-                # 5. 如果没有被 SimHash 过滤器跳过，则进行深入处理
-                print(f"检测到实质性更新，文档：{new_doc_info['title']}。")
-                old_doc_body = last_doc_info.get("body", "")
-                diff_content = find_diff(old_doc_body, document_body)
+                if distance > simhash_threshold:
+                    # 距离大于阈值，判定为显著更新
+                    is_significant = True
 
-                if diff_content:
-                    print("--- 差异内容 ---")
-                    print(diff_content)
-                else:
-                    print("内容无实质性变化。")
+                    # 额外输出差异内容（可选，仅作调试/通知用）
+                    # old_doc_body = last_doc_info.get("body", "")
+                    # diff_content = find_diff(old_doc_body, document_body)
+                    # if diff_content:
+                    #     print("   - 行级差异内容已检出...")
 
-                # 6. 将所有新数据（包括正文和指纹）保存到新字典中
-                new_run_data[doc_id_str] = new_doc_info
-                new_run_data[doc_id_str]["body"] = document_body
-                new_run_data[doc_id_str]["simhash"] = new_simhash_obj.value
+            if is_significant:
+                # 显著更新：加入待处理列表
+                updated_docs_meta.append(doc_meta)
+                print("   -> 判定为显著更新/新增，将提交给 LLM 重新处理。")
+            else:
+                print("   -> SimHash 距离较近，判定为微小修改，过滤。")
+
+            # 无论是否显著，都需要更新历史数据中的 'body' 和 'simhash'
+            new_run_data[doc_id_str] = new_doc_info
+            new_run_data[doc_id_str]["body"] = document_body
+            new_run_data[doc_id_str]["simhash"] = new_simhash_obj.value
 
         else:
-            # 7. 如果文档没有更新，也要将其所有数据复制过来
-            # 这样可以确保下次比对时仍有旧正文和指纹
-            new_run_data[doc_id_str] = last_doc_info
+            # 3. 文档未更新：直接复制旧数据，确保指纹和正文不丢失
+            new_run_data[doc_id_str] = last_doc_info.copy()
 
-    # 8. 保存本次运行的数据
+    # 4. 保存本次运行的数据
     save_data(data_file, new_run_data)
-    print("\n所有文档数据已保存，下次运行将以此为基准。")
+    print(f"\n--- 语雀增量检测完成：{len(updated_docs_meta)} 篇文档需重新处理。 ---")
 
-else:
-    print("无法获取语雀数据，请检查配置或网络连接。")
+    return updated_docs_meta
 
-'''
+
+# ----------------------------------------------------------------------
 if __name__ == "__main__":
-    # --- 测试代码 ---
-    test_data = {
-        "123": {"title": "first_doc", "updated_at": "2025-09-23T10:00:00Z"},
-        "456": {"title": "second_doc", "updated_at": "2025-09-23T11:00:00Z"},
-    }
-    filename = "test_data.json"
+    print("--- 🔬 yuque_summarizer.py 增量检测模块自检 ---")
 
-    save_data(filename, test_data)
-    print(f"测试数据已保存到{filename}")
+    # 运行增量检测函数
+    significant_updates = check_yuque_updates()
 
-    loaded_data = load_data(filename)
-    print("加载的数据：", loaded_data)
-
-    if os.path.exists(filename):
-        os.remove(filename)
-        print(f"已删除{filename}以模拟第一次运行。")
-
-    empty_data = load_data(filename)
-    print("加载空文件夹得到的数据：", empty_data)
-
-    print("\n--- 正在运行主程序... ---")
-'''
+    if significant_updates:
+        print("\n以下文档有显著更新，需提交给 LLM：")
+        for doc in significant_updates:
+            print(f" - {doc.get('title')} (ID: {doc.get('id')})")
+    else:
+        print("\n本次运行未检测到显著更新或新增文档。")
