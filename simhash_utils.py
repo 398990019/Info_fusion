@@ -23,7 +23,6 @@ NORMALIZE_MAP = {
     "领域": "学科",
     "推动": "促进",
     "发展": "进步",
-    "跨学科": "多学科",
     "人工智能": "AI",
     "哲学": "人文学科",
     "社会学": "人文学科"
@@ -39,8 +38,7 @@ def init_custom_words():
     """
     custom_words = [
         "人工智能学院",
-        "人工智能",
-        "跨学科",
+    "人工智能",
         "计算机科学",
         "神经科学",
         "社会学",
@@ -85,7 +83,7 @@ def generate_simhash(doc_text):
         return Simhash([""], f=128)
 
     word_counts = Counter(tokens)
-    weighted_tokens = [(token, count) for token, count in word_counts.items()]
+    weighted_tokens = [(token, min(count, 255)) for token, count in word_counts.items()]
     return Simhash(weighted_tokens, f=128)
 
 def get_hamming_distance(hash1, hash2):
@@ -102,8 +100,8 @@ if __name__ == '__main__':
     init_custom_words()
 
     # --- 1. 定义测试文档 ---
-    doc_a = "南京大学的人工智能学院致力于跨学科研究，融合了计算机科学与神经科学的前沿知识，以推动哲学和社会学领域的发展。"
-    doc_b = "南京大学的人工智能学院专注于跨学科探索，结合了计算机科学与神经科学的最新知识，以推动哲学和社会学领域的发展。"
+    doc_a = "南京大学的人工智能学院致力于研究，融合了计算机科学与神经科学的前沿知识，以推动哲学和社会学领域的发展。"
+    doc_b = "南京大学的人工智能学院专注于探索，结合了计算机科学与神经科学的最新知识，以推动哲学和社会学领域的发展。"
     doc_c = "昨夜雨疏风骤，浓睡不消残酒。试问卷帘人，却道海棠依旧。知否，知否？应是绿肥红瘦。"
 
     # --- 2. 生成 Simhash 签名 ---

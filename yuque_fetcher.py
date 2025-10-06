@@ -44,7 +44,7 @@ def fetch_doc_body(
         token: str,
         group_login: str,
         book_slug: str
-) -> dict or None:
+) -> dict | None:
     """
     获取单个语雀文档的全文内容。为并发执行优化。
     """
@@ -74,16 +74,33 @@ def fetch_doc_body(
         if doc_data is None:
             return None
 
+        author = None
+        if isinstance(doc_data.get('user'), dict):
+            author = doc_data['user'].get('name') or doc_data['user'].get('login')
+        if not author and isinstance(doc_meta.get('user'), dict):
+            author = doc_meta['user'].get('name') or doc_meta['user'].get('login')
+        if not author and isinstance(doc_data.get('creator'), dict):
+            author = doc_data['creator'].get('name') or doc_data['creator'].get('login')
+        if not author:
+            author = '作者未注明'
+
         # 将语雀数据标准化
+        # 构造可访问的原文链接：优先使用 API 返回的 url，否则按 slug 拼接
+        doc_url = doc_data.get('url')
+        if not doc_url and doc_id_or_slug:
+            doc_url = f"https://www.yuque.com/{group_login}/{book_slug}/{doc_id_or_slug}"
+
         return {
             'source': 'Yuque',
             'title': doc_data.get('title'),
             'slug': doc_data.get('slug'),
-            'url': doc_data.get('url'),
+            'url': doc_url,
             'published_at': doc_data.get('created_at'),
+            'author': author,
             # body_markdown 字段包含了 Markdown 格式的全文内容
             'content': doc_data.get('body_markdown', doc_data.get('body')),
-            'content_format': 'Markdown'
+            'content_format': 'Markdown',
+            'platform': 'yuque'
         }
     except requests.exceptions.RequestException:
         # 捕获请求异常，并安静地返回 None，以便并发执行不中断

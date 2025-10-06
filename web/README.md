@@ -5,7 +5,7 @@ This is a Next.js frontend application for displaying AI-processed articles and 
 ## Features
 
 - Modern, responsive design using Tailwind CSS
-- Article cards with summaries and cross-disciplinary insights
+- Article cards with summaries and key takeaways
 - TypeScript for type safety
 - Built with Next.js App Router
 

@@ -25,70 +25,74 @@ client = OpenAI(
 # ----------------------------------------------------------------------
 # 辅助函数：SimHash 去重 (已包含 SimHash 位宽修正)
 # ----------------------------------------------------------------------
-def filter_duplicates(articles: list, threshold: int = SIMHASH_THRESHOLD) -> list:
-    # ... (此函数内容保持不变，确保其中 Simhash(int(...), f=SIMHASH_F_BITS) 的修正已在)
-    stored_simhashes = []
-    unique_articles = []
+def filter_duplicates(articles: list, threshold: int = SIMHASH_THRESHOLD) -> tuple[list, list]:
+    stored_entries: list[dict] = []
+    unique_articles: list[dict] = []
+    filtered_articles: list[dict] = []
 
     for item in articles:
         content = item.get('content', '')
         if not content:
+            filtered_item = item.copy()
+            filtered_item['_filtered_reason'] = 'empty_content'
+            filtered_articles.append(filtered_item)
             continue
 
         try:
             item_simhash = generate_simhash(content)
         except Exception as e:
-            # ...
+            filtered_item = item.copy()
+            filtered_item['_filtered_reason'] = f'simhash_error: {e}'
+            filtered_articles.append(filtered_item)
             continue
 
-        is_duplicate = False
-        for existing_simhash_value in stored_simhashes:
-            # 确保 SimHash 位宽一致
-            existing_simhash = Simhash(int(existing_simhash_value), f=SIMHASH_F_BITS)
-
+        duplicate_of = None
+        for entry in stored_entries:
+            existing_simhash = Simhash(int(entry['value']), f=SIMHASH_F_BITS)
             distance = item_simhash.distance(existing_simhash)
 
             if distance <= threshold:
-                is_duplicate = True
+                duplicate_of = entry['article']
                 break
 
-        if not is_duplicate:
+        if duplicate_of is None:
             unique_articles.append(item)
-            stored_simhashes.append(item_simhash.value)
+            stored_entries.append({'value': item_simhash.value, 'article': item})
+        else:
+            filtered_item = item.copy()
+            filtered_item['_filtered_reason'] = 'duplicate'
+            filtered_item['_duplicate_of_title'] = duplicate_of.get('title')
+            filtered_item['_duplicate_of_source'] = duplicate_of.get('source')
+            filtered_articles.append(filtered_item)
 
-    return unique_articles
+    return unique_articles, filtered_articles
 
 
 # ----------------------------------------------------------------------
-# LLM 核心处理逻辑 (process_with_llm 保持不变)
+# LLM 核心处理逻辑
 # ----------------------------------------------------------------------
 def process_with_llm(article: dict) -> dict:
-    """
-    调用 Qwen API 对单篇文章进行深度总结和跨学科洞察。
-    """
+    """调用 Qwen API 为单篇文章生成结构化摘要。"""
 
-    # 构造 LLM 提示 (Prompt)
     title = article.get('title', '无标题')
     content = article.get('content', '')
 
-    system_prompt = f"""你是一位跨学科分析专家，尤其擅长计算机科学、人工智能、哲学、社会学、文学和神经科学。你的任务是阅读给定的文章，并以一个南京大学大一学生的知识水平，提供一个结构化的、深度思考后的分析报告。
+    system_prompt = (
+        "你是一位善于提炼要点的中文写作教练。"
+        "请阅读给定文章，并输出清晰、可靠、方便引用的结果。"
+        "严格按照指定 JSON 结构返回，不要包含额外说明。"
+    )
 
-    请严格按照以下 JSON 格式输出，不要输出任何其他内容。
+    user_prompt = f"""
+文章标题：{title}
+文章内容（已截断）：
+{content[:8000]}
 
-    [JSON 格式要求]
-    {{
-        "deep_summary": "请用中文提炼文章的**核心观点和主要论据**，字数不少于200字，要求条理清晰，可读性强。",
-        "cross_disciplinary_insights": [
-            {{
-                "field": "请选择一个最相关的跨学科领域（如：神经科学/哲学/社会学/文学）",
-                "insight": "请从该领域的角度出发，提出一个**独特的、发散性的洞察或反思**，并阐述该洞察如何加深对文章主题的理解。",
-                "connection": "请简述此洞察如何与文章的**核心技术或观点**进行交叉映射。"
-            }}
-        ],
-        "key_terms": ["专业名词1", "专业名词2", "专业名词3"]
-    }}"""
-
-    user_prompt = f"文章标题: {title}\n文章内容:\n{content[:5000]}..."  # 限制内容长度，避免API超限
+请返回 JSON，字段要求：
+- deep_summary：不少于180字的中文摘要，聚焦关键论点与结论。
+- key_points：长度为3的字符串数组，每项20字以内，概述核心要点。
+- open_question：一个引导深入思考的开放性问题。
+"""
 
     try:
         completion = client.chat.completions.create(
@@ -100,13 +104,26 @@ def process_with_llm(article: dict) -> dict:
             response_format={"type": "json_object"}
         )
 
-        # 解析 JSON 响应
         llm_output_json = json.loads(completion.choices[0].message.content)
 
-        # 将 LLM 结果合并到原始文章字典中
-        article['deep_summary'] = llm_output_json.get('deep_summary')
-        article['cross_disciplinary_insights'] = llm_output_json.get('cross_disciplinary_insights')
-        article['key_terms'] = llm_output_json.get('key_terms')
+        llm_result = {
+            'deep_summary': llm_output_json.get('deep_summary', '').strip(),
+            'key_points': llm_output_json.get('key_points', []),
+            'open_question': llm_output_json.get('open_question', '').strip()
+        }
+
+        link = article.get('link') or article.get('url')
+        summary_with_link = llm_result['deep_summary']
+        if link and llm_result['deep_summary']:
+            summary_with_link = f"{llm_result['deep_summary'].rstrip()}\n\n原文链接：{link}"
+
+        llm_result['deep_summary_with_link'] = summary_with_link
+
+        article['llm_result'] = llm_result
+        article['deep_summary'] = llm_result['deep_summary']
+        article['deep_summary_with_link'] = summary_with_link
+        article['key_points'] = llm_result['key_points']
+        article['open_question'] = llm_result['open_question']
         article['processed_at'] = datetime.now().isoformat()
 
         print(f" [AI] 成功处理文章: {title}")
@@ -114,7 +131,9 @@ def process_with_llm(article: dict) -> dict:
 
     except Exception as e:
         print(f" [AI] ERROR: 处理文章 '{title}' 失败: {e}")
-        # 失败的文章也返回，但没有处理结果
+        article.setdefault('llm_result', {})
+        article['llm_result']['error'] = str(e)
+        article['llm_result'].setdefault('deep_summary', '')
         return article
 
 
@@ -177,76 +196,6 @@ def get_text_features(s):
 
     # 使用滑动窗口生成 n-gram 特征
     return [s[i:i + width] for i in range(max(len(s) - width + 1, 1))]
-
-
-def process_with_llm(article_data: dict) -> dict:
-    """
-    调用通义千问 API 进行总结和跨学科扩展。
-    """
-    article_title = article_data.get('title')
-    article_content = article_data.get('content', '')
-
-    # 提示词融入你的知识输出型要求和兴趣领域
-    prompt = f"""
-    你是一名南京大学大一学生，对计算机科学、人工智能、哲学、社会学、文学、语言学和神经科学等领域有浓厚兴趣。
-
-    你的任务是分析以下文章内容，并以一种**知识输出型**的方式回答。请用 Markdown 格式输出分析内容。
-
-    **文章标题:** {article_title}
-    **文章内容:** ---
-    {article_content[:8000]} # 截断内容，避免超长
-    ---
-
-    请严格按照以下 **JSON 结构**返回结果，不要包含任何额外的文字解释、注释或Markdown块。
-
-    {{
-        "deep_summary": "用200字左右提炼文章的核心思想、关键论点和结论。",
-        "cross_disciplinary_insights": [
-            {{
-                "domain": "请从计算机科学、哲学、社会学等兴趣领域中选择一个与文章内容最相关的领域",
-                "analysis": "从该学科角度对文章内容进行深入解读、联想或启发。",
-                "connection": "请指出文章内容与该学科的某个具体概念（如：控制论、符号学、社会场的理论）的联系。"
-            }},
-            {{
-                "domain": "请选择另一个跨学科领域",
-                "analysis": "从该学科角度对文章内容进行解读、联想或启发。",
-                "connection": "请指出文章内容与该学科的某个具体概念（如：海德格尔的此在、生成语法、图灵测试）的联系。"
-            }}
-        ],
-        "open_question": "提出一个具有深度和启发性的开放式思考题，鼓励进一步研究。"
-    }}
-    """
-
-    print(f" [LLM] 正在处理: {article_title}...")
-
-    try:
-        completion = client.chat.completions.create(
-            model=AI_MODEL_NAME,
-            messages=[
-                {"role": "system",
-                 "content": "你是一位拥有多学科背景的、逻辑严谨的分析师，请严格以用户要求的 JSON 格式返回分析结果。"},
-                {"role": "user", "content": prompt},
-            ],
-            stream=False,
-            response_format={"type": "json_object"}
-        )
-
-        # 解析返回的 JSON 字符串
-        llm_output_json = json.loads(completion.choices[0].message.content)
-
-        # 将 LLM 结构化结果添加到数据中
-        article_data['llm_result'] = llm_output_json
-        article_data['processed_at'] = datetime.now().isoformat()
-        article_data['llm_model'] = AI_MODEL_NAME
-
-        print(f" [LLM] 处理成功: {article_title}")
-        return article_data
-
-    except Exception as e:
-        print(f" ERROR: LLM API 调用或 JSON 解析失败 ({article_title}): {e}")
-        # 如果失败，至少返回原始数据，并标记为失败
-        article_data['llm_status'] = 'FAILED'
-        return article_data
 
 
 
