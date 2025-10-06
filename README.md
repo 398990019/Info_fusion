@@ -201,3 +201,6 @@ python main.py
 ## 许可证
 
 MIT License
+
+## 特别鸣谢
+We-mp-rss项目:https://github.com/rachelos/we-mp-rss.
