@@ -1,5 +1,7 @@
 # Python
+# Python
 __pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
 *.so
@@ -9,6 +11,8 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+.venv/
+.tox/
 *.egg-info/
 dist/
 build/
@@ -21,6 +25,8 @@ yarn-error.log*
 .next/
 .nuxt/
 dist/
+web/.next/
+web/node_modules/
 
 # IDE
 .vscode/
@@ -35,6 +41,8 @@ Thumbs.db
 # Logs
 logs/
 *.log
+*.log.*
+*.out
 
 # Environment variables
 .env
@@ -42,3 +50,14 @@ logs/
 .env.development.local
 .env.test.local
 .env.production.local
+
+# Project generated data
+backup/
+final_knowledge_base.json
+filtered_articles.json
+yuque_data.json
+we-mp-rss-1.4.6/data/
+we-mp-rss-1.4.6/logs/
+we-mp-rss-1.4.6/static/wx_qrcode.png
+we-mp-rss-1.4.6/*.db
+*.db

@@ -47,7 +47,7 @@ def _env_str(name: str, default: Optional[str] = None, *, strip: bool = True) ->
 # --- AI Configuration (Qwen) ---
 AI_API_KEY = os.getenv('AI_API_KEY')  # 从环境变量获取
 AI_BASE_URL = os.getenv('AI_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1')
-AI_MODEL_NAME = os.getenv('AI_MODEL_NAME', 'qwen3-max')
+AI_MODEL_NAME = os.getenv('AI_MODEL_NAME', 'qwen-max')
 
 # --- Yuque Configuration ---
 YUQUE_TOKEN = os.getenv('YUQUE_TOKEN')  # 从环境变量获取
@@ -61,7 +61,7 @@ YUQUE_BASE_URL = "https://www.yuque.com/api/v2"
 WECHAT_RSS_URL = _env_str('WECHAT_RSS_URL', "http://localhost:8001/feed/all.rss")
 
 # 是否在抓取前主动触发 We-MP-RSS 刷新
-WECHAT_FORCE_REFRESH = _env_flag('WECHAT_FORCE_REFRESH', 'true')
+WECHAT_FORCE_REFRESH = _env_flag('WECHAT_FORCE_REFRESH', 'false')
 
 # 可选：显式指定 We-MP-RSS 项目目录（未设置时自动探测）
 WECHAT_RSS_ROOT = os.getenv('WECHAT_RSS_ROOT')
@@ -79,3 +79,12 @@ WECHAT_API_INCLUDE_CONTENT_FOR_NEW = _env_flag('WECHAT_API_INCLUDE_CONTENT_FOR_N
 # SimHash 汉明距离阈值：用于判断两篇文章是否重复
 # 阈值 4 意味着 128 位签名中最多有 4 位不同，被认为是相似文章。
 SIMHASH_THRESHOLD = 15
+
+# --- WeChat Fetcher Switches & Limits ---
+# 选择抓取实现：默认使用 We-MP-RSS 适配器（"wmr"）。预留："httpx"、"mock" 等。
+WECHAT_FETCHER_IMPL = _env_str('WECHAT_FETCHER_IMPL', 'wmr')
+
+# 抓取限速与并发（用于未来内置实现；当前适配器不强制使用）
+WECHAT_FETCH_CONCURRENCY = _env_int('WECHAT_FETCH_CONCURRENCY', 8)
+WECHAT_FETCH_QPS = _env_int('WECHAT_FETCH_QPS', 5)
+WECHAT_FETCH_TIMEOUT = _env_int('WECHAT_FETCH_TIMEOUT', 30)

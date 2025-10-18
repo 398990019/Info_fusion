@@ -15,11 +15,12 @@ source .venv/bin/activate 2>/dev/null || .venv\\Scripts\\activate
 
 # 安装Python依赖
 echo "正在检查Python依赖..."
-pip install -q flask flask-cors requests python-dotenv feedparser simhash lxml
+pip install -q --upgrade pip
+pip install -q -r requirements.txt
 
 # 启动API服务器
 echo "启动API服务器..."
-python api_server.py &
+python -m uvicorn api_server:app --host 0.0.0.0 --port 5000 &
 API_PID=$!
 echo "API服务器已启动 (PID: $API_PID)"
 
@@ -39,7 +40,7 @@ WEB_PID=$!
 
 echo ""
 echo "=== 系统启动完成 ==="
-echo "API服务器: http://localhost:5000"
+echo "API服务器: http://localhost:5000 (uvicorn)"
 echo "前端界面: http://localhost:3000"
 echo ""
 echo "按 Ctrl+C 停止所有服务"

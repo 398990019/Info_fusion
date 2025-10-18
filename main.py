@@ -1,19 +1,136 @@
 # main.py
 
-from wechat_pubaccount_fetcher import fetch_articles_from_rss
+from fetchers.wechat_fetcher_factory import create_wechat_fetcher
 from yuque_fetcher import fetch_all_yuque_docs
 from ai_processer import process_all_data_with_ai, filter_duplicates
 from logger import setup_logger
 import json
 import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Tuple
+from concurrent.futures import ThreadPoolExecutor
 # --- 修正 3: 引入配置 ---
 from config import YUQUE_TOKEN, YUQUE_GROUP, YUQUE_BOOK
 from yuque_summarizer import save_data
 
 
 FINAL_DATA_FILE = 'final_knowledge_base.json'
+FETCH_STATE_FILE = 'fetch_state.json'
+
+_WECHAT_ALIASES = {
+    'wechat', '微信公众号', 'weixin', 'wx', 'mp', 'official account'
+}
+
+
+def _normalize_datetime(value: datetime) -> datetime:
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
+def _parse_datetime(value) -> datetime | None:
+    if value is None:
+        return None
+
+    if isinstance(value, datetime):
+        return _normalize_datetime(value)
+
+    if isinstance(value, (int, float)):
+        try:
+            return _normalize_datetime(datetime.fromtimestamp(float(value)))
+        except (OverflowError, ValueError):
+            return None
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        replacement = text.replace('Z', '+00:00')
+        try:
+            dt = datetime.fromisoformat(replacement)
+            return _normalize_datetime(dt)
+        except ValueError:
+            try:
+                return _normalize_datetime(datetime.fromtimestamp(float(text)))
+            except (OverflowError, ValueError):
+                return None
+
+    return None
+
+
+def _load_fetch_state() -> dict:
+    path = Path(FETCH_STATE_FILE)
+    if not path.exists():
+        return {}
+    try:
+        with path.open('r', encoding='utf-8') as handle:
+            data = json.load(handle)
+            return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _save_fetch_state(state: dict) -> None:
+    path = Path(FETCH_STATE_FILE)
+    with path.open('w', encoding='utf-8') as handle:
+        json.dump(state, handle, ensure_ascii=False, indent=2)
+
+
+def _get_last_published_time(state: dict, source: str) -> datetime | None:
+    entry = state.get(source)
+    if not isinstance(entry, dict):
+        return None
+    return _parse_datetime(entry.get('last_published_time'))
+
+
+def _update_last_published_time(state: dict, source: str, value: datetime) -> None:
+    normalized = _normalize_datetime(value)
+    state.setdefault(source, {})['last_published_time'] = normalized.isoformat()
+    _save_fetch_state(state)
+
+
+def _is_wechat_article(article: dict) -> bool:
+    if not isinstance(article, dict):
+        return False
+
+    platform = article.get('platform')
+    if isinstance(platform, str) and platform.strip().lower() in _WECHAT_ALIASES:
+        return True
+
+    source = article.get('source')
+    if isinstance(source, str) and source.strip().lower() in _WECHAT_ALIASES:
+        return True
+
+    return False
+
+
+def _filter_new_wechat_articles(
+    articles: list[dict],
+    last_seen: datetime | None
+) -> tuple[list[dict], datetime | None]:
+    reference = _normalize_datetime(last_seen) if last_seen else None
+    newest = reference
+    fresh: list[dict] = []
+
+    for article in articles:
+        timestamp = (
+            article.get('published_time')
+            or article.get('published_at')
+            or article.get('updated_at')
+        )
+        parsed = _parse_datetime(timestamp)
+
+        if parsed and reference and parsed <= reference:
+            continue
+
+        fresh.append(article)
+
+        if parsed:
+            if newest is None or parsed > newest:
+                newest = parsed
+
+    return fresh, newest
 
 
 def load_existing_knowledge_base(file_path: str = FINAL_DATA_FILE) -> List[dict]:
@@ -56,6 +173,9 @@ def _normalize_text(value) -> str:
 
 
 def article_changed(new_article: dict, existing_article: dict) -> bool:
+    if _is_wechat_article(new_article) or _is_wechat_article(existing_article):
+        return False
+
     new_content = _normalize_text(new_article.get('content'))
     old_content = _normalize_text(existing_article.get('content'))
 
@@ -146,13 +266,52 @@ def combine_processed_articles(
 def run_data_aggregation():
     print("--- 启动信息聚合任务 ---")
 
-    # A. 微信内容接出 (简化为一步，使用 RSS 模式)
-    wechat_full_articles = fetch_articles_from_rss()
-    print(f" [微信] 成功获取 {len(wechat_full_articles)} 篇 RSS 文章。")
+    fetch_state = _load_fetch_state()
+    last_wechat_timestamp = _get_last_published_time(fetch_state, 'wechat')
 
-    # B. 语雀内容接出
-    # 使用 config 中的变量作为默认参数或直接传入
-    yuque_full_docs = fetch_all_yuque_docs(YUQUE_TOKEN, YUQUE_GROUP, YUQUE_BOOK)
+    # A & B. 并发获取微信和语雀内容
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        # 通过工厂创建实现（当前默认仍为 We-MP-RSS 适配器，行为不变）
+        wechat_fetcher = create_wechat_fetcher()
+        future_wechat = executor.submit(wechat_fetcher.list_articles)
+        future_yuque = executor.submit(
+            fetch_all_yuque_docs,
+            YUQUE_TOKEN,
+            YUQUE_GROUP,
+            YUQUE_BOOK,
+        )
+
+        try:
+            wechat_full_articles = future_wechat.result()
+        except Exception as exc:  # pragma: no cover - 防御性日志
+            print(f" [微信] 获取过程出现异常: {exc}")
+            wechat_full_articles = []
+
+        try:
+            yuque_full_docs = future_yuque.result()
+        except Exception as exc:  # pragma: no cover - 防御性日志
+            print(f" [语雀] 获取过程出现异常: {exc}")
+            yuque_full_docs = []
+
+    raw_wechat_count = len(wechat_full_articles)
+    wechat_full_articles, latest_wechat_timestamp = _filter_new_wechat_articles(
+        wechat_full_articles,
+        last_wechat_timestamp,
+    )
+
+    if latest_wechat_timestamp and (
+        last_wechat_timestamp is None or latest_wechat_timestamp > last_wechat_timestamp
+    ):
+        _update_last_published_time(fetch_state, 'wechat', latest_wechat_timestamp)
+
+    if last_wechat_timestamp:
+        print(
+            f" [微信] RSS 拉取 {raw_wechat_count} 篇，新增 {len(wechat_full_articles)} 篇，"
+            f" 上次时间 {last_wechat_timestamp.isoformat()}。"
+        )
+    else:
+        print(f" [微信] 初次运行，纳入 {len(wechat_full_articles)} 篇文章。")
+
     print(f" [语雀] 成功获取 {len(yuque_full_docs)} 篇文档。")
 
     # C. 数据汇集

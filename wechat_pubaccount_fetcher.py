@@ -7,10 +7,12 @@ from contextlib import closing
 from datetime import datetime
 from functools import lru_cache
 from typing import Iterable, Optional, Set, Tuple
+from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
 from config import (
+    WECHAT_API_BASE_URL,
     WECHAT_API_INCLUDE_CONTENT_FOR_NEW,
     WECHAT_API_MAX_PAGES,
     WECHAT_API_PAGE_SIZE,
@@ -391,6 +393,8 @@ def fetch_articles_from_rss() -> list[dict]:
                 api_enhanced += 1
 
             final_link = link_value or raw_link or raw_guid or normalized_link or 'No Link'
+            if isinstance(final_link, str):
+                final_link = _ensure_absolute_link(final_link)
             final_normalized = _normalize_wechat_url(final_link)
             if final_normalized:
                 seen_links.add(final_normalized)
@@ -440,6 +444,8 @@ def fetch_articles_from_rss() -> list[dict]:
 
                 article_id = meta.get('id')
                 link = meta.get('link') or normalized_link or 'No Link'
+                if isinstance(link, str):
+                    link = _ensure_absolute_link(link)
                 title = meta.get('title') or 'No Title'
                 mp_name = meta.get('mp_name') or '微信公众号'
                 author = meta.get('author') or mp_name
@@ -448,11 +454,29 @@ def fetch_articles_from_rss() -> list[dict]:
                 content_format = 'Text'
 
                 if WECHAT_API_INCLUDE_CONTENT_FOR_NEW and api_client and article_id:
-                    try:
-                        detail = api_client.fetch_article_content(int(article_id))
-                    except APIError as exc:
-                        print(f"警告: 获取文章 {article_id} 正文失败，使用摘要代替。原因: {exc}")
+                    article_numeric_id = None
+                    if isinstance(article_id, (int, float)):
+                        article_numeric_id = int(article_id)
+                    elif isinstance(article_id, str):
+                        try:
+                            article_numeric_id = int(article_id.strip())
+                        except ValueError:
+                            article_numeric_id = None
+
+                    if article_numeric_id is not None:
+                        try:
+                            detail = api_client.fetch_article_content(article_numeric_id)
+                        except APIError as exc:
+                            print(f"警告: 获取文章 {article_id} 正文失败，使用摘要代替。原因: {exc}")
+                            detail = None
+                    else:
                         detail = None
+                        # 非数字 ID 表示这是新的复合标识，API 暂不支持获取正文
+                        # 记录日志以便后续分析
+                        print(
+                            "警告: We-MP-RSS 返回的文章 ID 非数字格式，跳过正文拉取: "
+                            f"{article_id}"
+                        )
 
                     if detail:
                         content = detail.get('content') or content
@@ -526,6 +550,25 @@ def fetch_articles_from_rss() -> list[dict]:
 
     print(f"\n成功从 RSS Feed 获取 {len(all_articles_data)} 篇文章（元数据+全文）。")
     return all_articles_data
+
+
+def _ensure_absolute_link(link: str) -> str:
+    if not isinstance(link, str):
+        return link
+
+    candidate = link.strip()
+    if not candidate or candidate.lower().startswith(('http://', 'https://')):
+        return candidate
+
+    if WECHAT_API_BASE_URL:
+        base = WECHAT_API_BASE_URL.rstrip('/') + '/'
+        return urljoin(base, candidate.lstrip('/'))
+
+    if WECHAT_RSS_URL:
+        base = WECHAT_RSS_URL.split('/feed/', 1)[0].rstrip('/') + '/'
+        return urljoin(base, candidate.lstrip('/'))
+
+    return candidate
 
 # ----------------------------------------------------------------------
 if __name__ == '__main__':

@@ -14,7 +14,7 @@ SIMHASH_F_BITS = 128
 MAX_LLM_WORKERS = 5  # LLM 并发线程数：不宜设置过高，以避免API限速
 
 # ----------------------------------------------------------------------
-# 阿里云 Dashscope 通义千问 配置 (Qwen)
+# AI配置
 # ----------------------------------------------------------------------
 client = OpenAI(
     api_key=AI_API_KEY,
@@ -72,15 +72,13 @@ def filter_duplicates(articles: list, threshold: int = SIMHASH_THRESHOLD) -> tup
 # LLM 核心处理逻辑
 # ----------------------------------------------------------------------
 def process_with_llm(article: dict) -> dict:
-    """调用 Qwen API 为单篇文章生成结构化摘要。"""
+    """调用 AI API 为单篇文章生成结构化摘要。"""
 
     title = article.get('title', '无标题')
     content = article.get('content', '')
 
     system_prompt = (
-        "你是一位善于提炼要点的中文写作教练。"
-        "请阅读给定文章，并输出清晰、可靠、方便引用的结果。"
-        "严格按照指定 JSON 结构返回，不要包含额外说明。"
+        "你是一位专注于服务南京大学学生的信息提炼专家。你的任务是阅读给定文章，提取对南大学生最有价值的信息，包括：紧急通知、学术DDL（截止日期）、奖学金/实习/竞赛等资源机遇、校园活动、以及学业与个人发展建议。输出必须严格遵循指定JSON结构，不包含任何额外文本或说明。摘要和要点应基于事实、突出时效性和可操作性，语言简洁清晰。"
     )
 
     user_prompt = f"""
@@ -89,7 +87,7 @@ def process_with_llm(article: dict) -> dict:
 {content[:8000]}
 
 请返回 JSON，字段要求：
-- deep_summary：不少于180字的中文摘要，聚焦关键论点与结论。
+- deep_summary：不少于180字的中文摘要，聚焦关键有效信息。
 - key_points：长度为3的字符串数组，每项20字以内，概述核心要点。
 - open_question：一个引导深入思考的开放性问题。
 """

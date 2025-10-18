@@ -54,6 +54,8 @@ for %%D in (
 if defined WE_RSS_DIR (
     echo 已检测到 We-MP-RSS 目录: %WE_RSS_DIR%
     set "WE_RSS_REQ=%WE_RSS_DIR%\requirements.txt"
+    REM 导出 WECHAT_RSS_ROOT，确保本项目读取的 db.db 与当前启动的 We-MP-RSS 实例一致
+    set "WECHAT_RSS_ROOT=%WE_RSS_DIR%"
 ) else (
     set "WE_RSS_REQ="
 )
@@ -83,10 +85,11 @@ if defined WE_RSS_DIR if exist "%WE_RSS_DIR%\main.py" (
         set "WE_RSS_INIT=-init True"
     )
     echo 启动 We-MP-RSS 服务（日志输出至 logs\we_mp_rss.log）...
-    start "" /B cmd /c "cd /d \"%WE_RSS_DIR%\" && \"%SCRIPT_DIR%\.venv\Scripts\python.exe\" main.py -job True %WE_RSS_INIT% >> \"%SCRIPT_DIR%\logs\we_mp_rss.log\" 2>&1"
+        start "" /B cmd /c "cd /d ""%WE_RSS_DIR%"" && ""%SCRIPT_DIR%\.venv\Scripts\python.exe"" main.py -job True %WE_RSS_INIT% >> ""%SCRIPT_DIR%\logs\we_mp_rss.log"" 2>&1"
     echo 正在等待 We-MP-RSS 服务就绪...
     set "WE_RSS_READY=0"
-    set "WE_RSS_HEALTH_URL=http://127.0.0.1:8001/feed/all.rss"
+    REM 优先使用无需登录的 /docs 接口进行健康检查，避免 feed 需要凭证时误报
+    set "WE_RSS_HEALTH_URL=http://127.0.0.1:8001/docs"
     for /L %%I in (1,1,15) do (
         powershell -NoProfile -Command "try { Invoke-WebRequest -Uri '%WE_RSS_HEALTH_URL%' -UseBasicParsing -TimeoutSec 2 ^| Out-Null; exit 0 } catch { exit 1 }" >nul 2>&1
         if not errorlevel 1 (
@@ -105,6 +108,24 @@ if defined WE_RSS_DIR if exist "%WE_RSS_DIR%\main.py" (
     echo 警告: 未找到 We-MP-RSS 项目，跳过服务启动。
 )
 
+REM 打印当前将使用的 RSS 源
+echo Current WECHAT_RSS_URL: %WECHAT_RSS_URL%
+
+REM 若开启强制刷新，则清理增量游标，避免旧时间戳导致过滤
+if /I "%WECHAT_FORCE_REFRESH%"=="true" (
+    if exist "fetch_state.json" del /Q /F "fetch_state.json"
+    echo 已清理增量状态文件 fetch_state.json（因 WECHAT_FORCE_REFRESH=true）。
+)
+
+REM 在运行 main.py 前，显式触发一次 We-MP-RSS 刷新（尽量拉取最新订阅文章）
+
+echo 正在触发 We-MP-RSS 刷新...
+"%SCRIPT_DIR%\.venv\Scripts\python.exe" "%SCRIPT_DIR%scripts\trigger_we_mp_rss_refresh.py" 1>>"%SCRIPT_DIR%\logs\we_mp_rss_refresh.log" 2>&1
+if errorlevel 1 (
+    echo 警告: We-MP-RSS 刷新命令返回非零状态，请检查 logs\we_mp_rss_refresh.log。
+)
+echo 刷新已触发，稍候将开始聚合。
+
 REM 执行数据聚合与 AI 处理管道
 echo 正在执行数据聚合与AI分析流程 (main.py)...
 python main.py
@@ -116,10 +137,13 @@ if errorlevel 1 (
 
 REM 启动API服务器（后台运行）
 echo 启动API服务器...
-start /B python api_server.py
+start /B python -m uvicorn api_server:app --host 0.0.0.0 --port 5000
 
 REM 等待API服务器启动
 timeout /t 3 > nul
+
+REM 调用运维接口：清理微信相关缓存并触发刷新（若 API_TOKEN 存在将自动携带鉴权）
+powershell -NoProfile -Command "try { $h=@{}; if ($env:API_TOKEN) { $h.Authorization = 'Bearer ' + $env:API_TOKEN }; Invoke-RestMethod -Method Post -Headers $h -Uri 'http://127.0.0.1:5000/ops/wechat/reload?refresh=1&deep=1' -TimeoutSec 30 | Out-String | Write-Host } catch { Write-Host '提示: /ops/wechat/reload 调用失败（可能 API 未就绪或需要鉴权）。' }"
 
 REM 切换到web目录
 cd web
@@ -134,7 +158,7 @@ if not exist "node_modules" (
 
 echo.
 echo === 系统启动完成 ===
-echo API服务器: http://localhost:5000
+echo API服务器: http://localhost:5000 (uvicorn)
 echo 前端界面: http://localhost:3000
 echo.
 echo 按任意键停止服务...

@@ -146,7 +146,11 @@ class WeMPRSSClient:
         except ValueError as exc:  # pragma: no cover - 上游返回 HTML/纯文本
             raise AuthError("登录响应不是 JSON 格式") from exc
 
-        if payload.get("code") != 0:
+        if not isinstance(payload, dict):
+            raise AuthError(f"登录响应格式异常: {payload}")
+
+        # We-MP-RSS 旧版返回 {code: 0, data: {...}}，新版返回 OAuth 风格
+        if payload.get("code") not in (None, 0):
             msg = (
                 payload.get("message")
                 or payload.get("msg")
@@ -156,10 +160,28 @@ class WeMPRSSClient:
             )
             raise AuthError(f"登录失败: {msg} · 响应: {payload}")
 
-        data = payload.get("data", {})
-        token = data.get("access_token")
-        expires_in = data.get("expires_in")
+        token: Optional[str] = None
+        expires_in: Optional[float] = None
+
+        if "data" in payload and isinstance(payload["data"], dict):
+            data = payload["data"]
+            token = data.get("access_token")
+            expires_in = data.get("expires_in")
+        else:
+            token = payload.get("access_token")
+            expires_in = payload.get("expires_in")
+
+        if isinstance(expires_in, str):
+            try:
+                expires_in = float(expires_in)
+            except ValueError:
+                expires_in = None
+
         if not token or not isinstance(expires_in, (int, float)):
+            detail = payload.get("detail")
+            if isinstance(detail, dict):
+                message = detail.get("message") or detail.get("error")
+                raise AuthError(f"登录失败: {message} · 响应: {payload}")
             raise AuthError("登录响应缺少 access_token 或 expires_in 字段")
 
         expires_at = time.time() + float(expires_in)
@@ -206,10 +228,25 @@ class WeMPRSSClient:
         except ValueError as exc:  # pragma: no cover
             raise APIError("We-MP-RSS API 响应不是 JSON") from exc
 
-        if payload.get("code") != 0:
-            raise APIError(payload.get("message", "未知错误"))
+        if not isinstance(payload, dict):
+            return payload
 
-        return payload.get("data", {})
+        # 新旧两套 API 的兼容处理
+        if payload.get("code") not in (None, 0):
+            detail = payload.get("detail")
+            message = (
+                payload.get("message")
+                or payload.get("msg")
+                or (detail.get("message") if isinstance(detail, dict) else None)
+                or payload.get("error")
+                or str(payload.get("code"))
+            )
+            raise APIError(message or "未知错误")
+
+        if "data" in payload and isinstance(payload["data"], dict):
+            return payload["data"]
+
+        return payload
 
     # ------------------------------------------------------------------
     # Public methods
